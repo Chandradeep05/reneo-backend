@@ -60,10 +60,10 @@ CREATE TABLE IF NOT EXISTS products (
   price_fcfa    BIGINT NOT NULL CHECK (price_fcfa > 0),
   category      TEXT NOT NULL CHECK (char_length(category) BETWEEN 1 AND 100),
   is_archived   BOOLEAN NOT NULL DEFAULT false,
-  -- Generated tsvector for full-text search â€” 'simple' is language-neutral
-  -- Covers name, description, and category
+  -- Generated tsvector for full-text search â€” 'simple'::regconfig is immutable
+  -- (plain 'simple' string literal causes 42P17 "not immutable" in some PG builds)
   search_vector TSVECTOR GENERATED ALWAYS AS (
-    to_tsvector('simple',
+    to_tsvector('simple'::regconfig,
       coalesce(name, '') || ' ' ||
       coalesce(description, '') || ' ' ||
       coalesce(category, '')
