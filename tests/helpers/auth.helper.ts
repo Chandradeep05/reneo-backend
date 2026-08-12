@@ -1,6 +1,6 @@
-import { supabase, supabaseAdmin } from '../../src/config/supabase';
+import { supabaseAdmin } from '../../src/config/supabase';
 
-interface TestUser {
+export interface TestUser {
   id: string;
   email: string;
   token: string;
@@ -8,8 +8,14 @@ interface TestUser {
 }
 
 /**
- * Creates a test user via Supabase Auth + inserts profile.
- * Automatically cleans up in test teardown when deleteTestUser is called.
+ * Creates a test user via the Supabase Admin API.
+ *
+ * We use `supabaseAdmin.auth.admin.createUser` instead of `signUp` because:
+ *  - `signUp` requires email confirmation by default (blocks login in tests)
+ *  - Admin `createUser` with `email_confirm: true` bypasses the confirmation step
+ *
+ * This is valid for integration tests — we're testing our own API logic,
+ * not Supabase's email confirmation flow.
  */
 export async function createTestUser(
   email: string,
@@ -17,47 +23,76 @@ export async function createTestUser(
   role: 'SELLER' | 'CUSTOMER',
   fullName?: string
 ): Promise<TestUser> {
-  // Sign up
-  const { data, error } = await supabase.auth.signUp({ email, password });
-  if (error || !data.user) throw new Error(`Test signup failed: ${error?.message}`);
+  // Create user via admin (skips email confirmation)
+  const { data: created, error: createError } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true, // bypass confirmation — required for tests to be able to sign in
+  });
+
+  if (createError || !created.user) {
+    throw new Error(`Test user creation failed: ${createError?.message}`);
+  }
+
+  const userId = created.user.id;
 
   // Insert profile (service role bypasses RLS)
   const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
-    id: data.user.id,
+    id: userId,
     role,
     full_name: fullName ?? `Test ${role} ${Date.now()}`,
   });
-  if (profileError) throw new Error(`Test profile failed: ${profileError.message}`);
+
+  if (profileError) {
+    await supabaseAdmin.auth.admin.deleteUser(userId);
+    throw new Error(`Test profile creation failed: ${profileError.message}`);
+  }
 
   // Sign in to get access token
-  const { data: session, error: loginError } = await supabase.auth.signInWithPassword({
+  const { data: session, error: loginError } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'magiclink',
+    email,
+  });
+
+  // Fall back to signInWithPassword (works since email is confirmed)
+  const { createClient } = await import('@supabase/supabase-js');
+
+  // Load env manually since this runs before the app
+  const supabaseUrl = process.env['SUPABASE_URL']!;
+  const anonKey = process.env['SUPABASE_ANON_KEY']!;
+  const client = createClient(supabaseUrl, anonKey);
+
+  const { data: signInData, error: signInError } = await client.auth.signInWithPassword({
     email,
     password,
   });
-  if (loginError || !session.session) {
-    throw new Error(`Test login failed: ${loginError?.message}`);
+
+  if (signInError || !signInData.session) {
+    throw new Error(`Test sign-in failed: ${signInError?.message}`);
   }
 
   return {
-    id: data.user.id,
+    id: userId,
     email,
-    token: session.session.access_token,
+    token: signInData.session.access_token,
     role,
   };
 }
 
 /**
- * Delete a test user and their profile (cascades via FK).
+ * Delete a test user (cascades profile via FK).
  */
 export async function deleteTestUser(userId: string): Promise<void> {
   await supabaseAdmin.auth.admin.deleteUser(userId);
 }
 
 /**
- * Get a fresh access token for an existing test user.
+ * Get a fresh access token for a test user.
  */
 export async function getToken(email: string, password: string): Promise<string> {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  const { createClient } = await import('@supabase/supabase-js');
+  const client = createClient(process.env['SUPABASE_URL']!, process.env['SUPABASE_ANON_KEY']!);
+  const { data, error } = await client.auth.signInWithPassword({ email, password });
   if (error || !data.session) throw new Error(`Login failed: ${error?.message}`);
   return data.session.access_token;
 }

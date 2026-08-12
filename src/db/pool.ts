@@ -29,7 +29,9 @@ export const pool = new Pool({
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-  ssl: env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  // SSL required for Supabase pooler (port 6543) in all environments.
+  // rejectUnauthorized: false accepts Supabase's self-signed cert.
+  ssl: { rejectUnauthorized: false },
 });
 
 pool.on('error', (err) => {
