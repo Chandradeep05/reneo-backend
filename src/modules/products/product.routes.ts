@@ -41,7 +41,7 @@ productRouter.get(
   validate(ProductQuerySchema, 'query'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const result = await listProducts(req.query as Parameters<typeof listProducts>[0]);
+      const result = await listProducts(req.query as unknown as Parameters<typeof listProducts>[0]);
       res.status(200).json(result);
     } catch (err) {
       next(err);

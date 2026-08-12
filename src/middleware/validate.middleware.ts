@@ -16,7 +16,7 @@ export function validate(
     try {
       const parsed = schema.parse(req[target]);
       // Replace with parsed data (coercions applied, defaults filled)
-      (req as Record<string, unknown>)[target] = parsed;
+      (req as unknown as Record<string, unknown>)[target] = parsed;
       next();
     } catch (err) {
       next(err); // ZodError → error middleware formats as 400
