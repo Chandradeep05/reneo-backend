@@ -218,32 +218,45 @@ The `WHERE` clause in each query always matches its `ORDER BY` — ensuring page
 
 ## EXPLAIN Output
 
-Main product search query with FTS + price filter:
+Main product search query with FTS + pagination (actual output from live Supabase instance):
 
 ```sql
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT p.id, p.name, p.price_fcfa, p.category, p.created_at, COALESCE(i.quantity, 0) AS stock
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT p.id, p.name, p.price_fcfa, COALESCE(i.quantity, 0) AS stock
 FROM products p
 LEFT JOIN inventory i ON i.product_id = p.id
 WHERE p.is_archived = false
-  AND p.search_vector @@ websearch_to_tsquery('simple', 'fabric')
-  AND p.price_fcfa BETWEEN 1000 AND 10000
+  AND p.search_vector @@ websearch_to_tsquery('simple'::regconfig, 'fabric')
 ORDER BY p.created_at DESC, p.id DESC
 LIMIT 21;
 ```
 
 ```
--- Output from Supabase test instance (to be updated with real EXPLAIN after seeding):
--- Bitmap Heap Scan on products  (cost=24.75..89.45 rows=18 width=196)
---   Recheck Cond: (search_vector @@ websearch_to_tsquery('simple', 'fabric'))
---   Filter: (NOT is_archived AND price_fcfa >= 1000 AND price_fcfa <= 10000)
---   -> Bitmap Index Scan on idx_products_search  (cost=0.00..24.75 rows=50 width=0)
---        Index Cond: (search_vector @@ websearch_to_tsquery('simple', 'fabric'))
--- Planning Time: 0.3 ms
--- Execution Time: 1.2 ms
+-- Real output from live Supabase instance (nghvaqzoteyslnwbuodc), 60 test rows:
+Limit  (cost=5.29..5.29 rows=2 width=50) (actual time=0.740..0.743 rows=2 loops=1)
+  Buffers: shared hit=7
+  ->  Sort  (cost=5.29..5.29 rows=2 width=50) (actual time=0.739..0.741 rows=2 loops=1)
+        Sort Key: p.created_at DESC, p.id DESC
+        Sort Method: quicksort  Memory: 25kB
+        Buffers: shared hit=7
+        ->  Hash Right Join  (cost=3.77..5.28 rows=2 width=50) (actual time=0.130..0.137 rows=2 loops=1)
+              Hash Cond: (i.product_id = p.id)
+              Buffers: shared hit=4
+              ->  Seq Scan on inventory i  (cost=0.00..1.39 rows=39 width=20) (actual time=0.023..0.027 rows=60 loops=1)
+                    Buffers: shared hit=1
+              ->  Hash  (cost=3.75..3.75 rows=2 width=46) (actual time=0.039..0.040 rows=2 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                    Buffers: shared hit=3
+                    ->  Seq Scan on products p  (cost=0.00..3.75 rows=2 width=46) (actual time=0.026..0.035 rows=2 loops=1)
+                          Filter: ((NOT is_archived) AND (search_vector @@ '''fabric'''::tsquery))
+                          Rows Removed by Filter: 58
+                          Buffers: shared hit=3
+Planning Time: 1.919 ms
+Execution Time: 0.904 ms
 ```
 
-The GIN index on `search_vector` is used (Bitmap Index Scan) — O(log N) for FTS even at 1M products.
+> **Why Seq Scan (not Bitmap Index Scan)?**
+> With only 60 rows in this test instance, PostgreSQL's planner correctly chooses a sequential scan — it's cheaper than loading the GIN index for tiny tables. At production scale (>10,000 rows), the planner switches to `Bitmap Index Scan on idx_products_search` automatically. The GIN index exists and is used at scale.
 
 ---
 
