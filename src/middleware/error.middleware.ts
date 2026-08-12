@@ -67,6 +67,21 @@ export function errorMiddleware(
     return;
   }
 
+  // Handle PostgreSQL errors — invalid input syntax (e.g. SQL injection in UUID params)
+  const pgErr = err as { code?: string };
+  if (pgErr.code === '22P02') {
+    // invalid_text_representation — bad UUID, bad integer, etc.
+    res.status(400).json({
+      type: 'https://reneo.app/errors/validation-error',
+      title: 'Invalid Parameter',
+      status: 400,
+      detail: 'Invalid parameter format',
+      instance,
+      requestId,
+    });
+    return;
+  }
+
   // Unknown/unexpected error
   // Never leak stack traces or internal details in production
   const detail =

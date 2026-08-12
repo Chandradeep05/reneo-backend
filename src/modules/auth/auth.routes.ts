@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { validate } from '../../middleware/validate.middleware';
 import { z } from 'zod';
 import { supabase, supabaseAdmin } from '../../config/supabase';
+import { pool } from '../../db/pool';
 import { ConflictError, UnauthorizedError, ValidationError } from '../../utils/errors';
 
 export const authRouter = Router();
@@ -30,14 +31,15 @@ authRouter.post(
     try {
       const { email, password, full_name, role } = req.body as z.infer<typeof RegisterSchema>;
 
-      // Create auth user
-      const { data: authData, error: signUpError } = await supabase.auth.signUp({
+      const { data: authData, error: signUpError } = await supabaseAdmin.auth.admin.createUser({
         email,
         password,
+        email_confirm: true,
       });
 
       if (signUpError) {
-        if (signUpError.message.toLowerCase().includes('already registered')) {
+        if (signUpError.message.toLowerCase().includes('already registered') ||
+            signUpError.message.toLowerCase().includes('already been registered')) {
           throw new ConflictError('An account with this email already exists');
         }
         throw new ValidationError(signUpError.message);
@@ -47,18 +49,11 @@ authRouter.post(
         throw new ValidationError('Registration failed — please try again');
       }
 
-      // Create profile using service role (bypasses RLS for initial insert)
-      const { error: profileError } = await supabaseAdmin.from('profiles').insert({
-        id: authData.user.id,
-        role,
-        full_name,
-      });
-
-      if (profileError) {
-        // Cleanup: delete the auth user if profile creation fails
-        await supabaseAdmin.auth.admin.deleteUser(authData.user.id);
-        throw new Error(`Profile creation failed: ${profileError.message}`);
-      }
+      // Insert profile via raw pool — FORCE RLS on profiles blocks PostgREST
+      await pool.query(
+        `INSERT INTO profiles (id, role, full_name) VALUES ($1, $2, $3)`,
+        [authData.user.id, role, full_name]
+      );
 
       res.status(201).json({
         data: {
@@ -68,7 +63,7 @@ authRouter.post(
             role,
             full_name,
           },
-          session: authData.session,
+          session: null, // Call POST /auth/login to obtain a token
         },
       });
     } catch (err) {

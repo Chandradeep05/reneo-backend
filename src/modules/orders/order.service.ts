@@ -24,6 +24,7 @@ export interface OrderItemResult {
 export interface PlaceOrderResult {
   order: Order;
   items: OrderItemResult[];
+  fromCache?: boolean;  // true when returning cached idempotent response
 }
 
 // ── Hash helper ───────────────────────────────────────────────────────
@@ -100,7 +101,7 @@ export async function placeOrder(
   // with a 2-second gap — no DB transaction needed for the second click).
   if (idempotencyKey) {
     const cached = await getCachedResponse(idempotencyKey, customerId, requestHash!);
-    if (cached.type === 'ok') return cached.result;
+    if (cached.type === 'ok') return { ...cached.result, fromCache: true };
     if (cached.type === 'hash_mismatch') {
       throw new ConflictError(
         'This Idempotency-Key was already used with a different request payload. ' +
@@ -137,7 +138,7 @@ export async function placeOrder(
           for (let attempt = 0; attempt < 10; attempt++) {
             await sleep(100);
             const cached = await getCachedResponse(idempotencyKey, customerId, requestHash!);
-            if (cached.type === 'ok') return cached.result;
+            if (cached.type === 'ok') return { ...cached.result, fromCache: true };
             if (cached.type === 'hash_mismatch') {
               throw new ConflictError(
                 'This Idempotency-Key was already used with a different request payload.'
@@ -206,11 +207,12 @@ export async function placeOrder(
 
     for (const item of input.items) {
       const locked = lockedRows.find((r) => r.product_id === item.product_id)!;
-      totalFcfa += Number(locked.price_fcfa) * item.quantity;
+      const unitPrice = Number(locked.price_fcfa);
+      totalFcfa += unitPrice * item.quantity;
       resolvedItems.push({
         product_id: item.product_id,
         quantity: item.quantity,
-        unit_price_fcfa: Number(locked.price_fcfa),
+        unit_price_fcfa: unitPrice,
       });
     }
 
@@ -256,18 +258,24 @@ export async function placeOrder(
       })]
     );
 
-    const result: PlaceOrderResult = { order: order!, items: createdItems };
+    // Coerce BIGINT strings from pg to JS numbers before storing/returning
+    const coercedOrder: Order = {
+      ...order!,
+      total_fcfa: Number(order!.total_fcfa),
+    };
+    const coercedItems: OrderItemResult[] = createdItems.map((it) => ({
+      ...it,
+      unit_price_fcfa: Number(it.unit_price_fcfa),
+    }));
+    const result: PlaceOrderResult = { order: coercedOrder, items: coercedItems };
 
     // ── B2: Update idempotency response INSIDE the transaction ───────
-    // This is the critical fix (Verdict 2): the response is written
-    // atomically with the order. After COMMIT, the response is immediately
-    // available. No sleep(), no post-commit race window.
     if (idempotencyKey) {
       await client.query(
         `UPDATE idempotency_keys
          SET order_id = $1, response = $2::jsonb
          WHERE key = $3`,
-        [order!.id, JSON.stringify(result), idempotencyKey]
+        [coercedOrder.id, JSON.stringify(result), idempotencyKey]
       );
     }
 
@@ -288,29 +296,32 @@ export async function getOrder(
   orderId: string
 ): Promise<PlaceOrderResult> {
   const { rows: [order] } = await pool.query<Order>(
-    `SELECT id, customer_id, status, total_fcfa, idempotency_key, created_at
+    `SELECT id, customer_id, status, total_fcfa::bigint, idempotency_key, created_at
      FROM orders WHERE id = $1 AND customer_id = $2`,
     [orderId, customerId]
   );
   if (!order) throw new NotFoundError(`Order '${orderId}' not found`);
 
   const { rows: items } = await pool.query<OrderItemResult>(
-    `SELECT id, order_id, product_id, quantity, unit_price_fcfa
+    `SELECT id, order_id, product_id, quantity, unit_price_fcfa::bigint
      FROM order_items WHERE order_id = $1`,
     [orderId]
   );
-  return { order, items };
+  return {
+    order: { ...order, total_fcfa: Number(order.total_fcfa) },
+    items: items.map((it) => ({ ...it, unit_price_fcfa: Number(it.unit_price_fcfa) })),
+  };
 }
 
 // ── listOrders ────────────────────────────────────────────────────────
 export async function listOrders(customerId: string): Promise<Order[]> {
   const { rows } = await pool.query<Order>(
-    `SELECT id, customer_id, status, total_fcfa, idempotency_key, created_at
+    `SELECT id, customer_id, status, total_fcfa::bigint, idempotency_key, created_at
      FROM orders WHERE customer_id = $1
      ORDER BY created_at DESC LIMIT 50`,
     [customerId]
   );
-  return rows;
+  return rows.map((r) => ({ ...r, total_fcfa: Number(r.total_fcfa) }));
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────

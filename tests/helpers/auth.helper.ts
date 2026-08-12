@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../../src/config/supabase';
+import { pool } from '../../src/db/pool';
 
 export interface TestUser {
   id: string;
@@ -10,12 +11,15 @@ export interface TestUser {
 /**
  * Creates a test user via the Supabase Admin API.
  *
- * We use `supabaseAdmin.auth.admin.createUser` instead of `signUp` because:
- *  - `signUp` requires email confirmation by default (blocks login in tests)
- *  - Admin `createUser` with `email_confirm: true` bypasses the confirmation step
+ * Why admin.createUser instead of signUp:
+ *   signUp requires email confirmation → blocks sign-in in tests.
+ *   Admin createUser with email_confirm: true skips that step.
  *
- * This is valid for integration tests — we're testing our own API logic,
- * not Supabase's email confirmation flow.
+ * Why raw pool for profile insert:
+ *   FORCE ROW LEVEL SECURITY applies even to the service_role JWT when
+ *   using the REST/PostgREST interface — no INSERT policy exists on profiles
+ *   (intentionally, to prevent profile spoofing). The raw pg.Pool connects
+ *   as the postgres superuser which is exempt from RLS entirely.
  */
 export async function createTestUser(
   email: string,
@@ -23,11 +27,11 @@ export async function createTestUser(
   role: 'SELLER' | 'CUSTOMER',
   fullName?: string
 ): Promise<TestUser> {
-  // Create user via admin (skips email confirmation)
+  // 1. Create auth user (admin API — no email confirmation needed)
   const { data: created, error: createError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
-    email_confirm: true, // bypass confirmation — required for tests to be able to sign in
+    email_confirm: true,
   });
 
   if (createError || !created.user) {
@@ -35,39 +39,29 @@ export async function createTestUser(
   }
 
   const userId = created.user.id;
+  const name = fullName ?? `Test ${role} ${Date.now()}`;
 
-  // Insert profile (service role bypasses RLS)
-  const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
-    id: userId,
-    role,
-    full_name: fullName ?? `Test ${role} ${Date.now()}`,
-  });
-
-  if (profileError) {
+  // 2. Insert profile via raw pool — postgres superuser bypasses FORCE RLS
+  try {
+    await pool.query(
+      `INSERT INTO profiles (id, role, full_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, full_name = EXCLUDED.full_name`,
+      [userId, role, name]
+    );
+  } catch (err) {
     await supabaseAdmin.auth.admin.deleteUser(userId);
-    throw new Error(`Test profile creation failed: ${profileError.message}`);
+    throw new Error(`Test profile creation failed: ${(err as Error).message}`);
   }
 
-  // Sign in to get access token
-  const { data: session, error: loginError } = await supabaseAdmin.auth.admin.generateLink({
-    type: 'magiclink',
-    email,
-  });
-
-  // Fall back to signInWithPassword (works since email is confirmed)
-  const { createClient } = await import('@supabase/supabase-js');
-
-  // Load env manually since this runs before the app
-  const supabaseUrl = process.env['SUPABASE_URL']!;
-  const anonKey = process.env['SUPABASE_ANON_KEY']!;
-  const client = createClient(supabaseUrl, anonKey);
-
-  const { data: signInData, error: signInError } = await client.auth.signInWithPassword({
+  // 3. Sign in to get JWT
+  const { data: signInData, error: signInError } = await supabaseAdmin.auth.signInWithPassword({
     email,
     password,
   });
 
   if (signInError || !signInData.session) {
+    await supabaseAdmin.auth.admin.deleteUser(userId);
     throw new Error(`Test sign-in failed: ${signInError?.message}`);
   }
 
@@ -80,7 +74,21 @@ export async function createTestUser(
 }
 
 /**
- * Delete a test user (cascades profile via FK).
+ * Delete test users by ID. Cascades profile via FK.
+ */
+export async function cleanupUsers(userIds: string[]): Promise<void> {
+  for (const id of userIds) {
+    if (!id) continue;
+    try {
+      await supabaseAdmin.auth.admin.deleteUser(id);
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+}
+
+/**
+ * Delete a single test user.
  */
 export async function deleteTestUser(userId: string): Promise<void> {
   await supabaseAdmin.auth.admin.deleteUser(userId);
@@ -90,9 +98,7 @@ export async function deleteTestUser(userId: string): Promise<void> {
  * Get a fresh access token for a test user.
  */
 export async function getToken(email: string, password: string): Promise<string> {
-  const { createClient } = await import('@supabase/supabase-js');
-  const client = createClient(process.env['SUPABASE_URL']!, process.env['SUPABASE_ANON_KEY']!);
-  const { data, error } = await client.auth.signInWithPassword({ email, password });
+  const { data, error } = await supabaseAdmin.auth.signInWithPassword({ email, password });
   if (error || !data.session) throw new Error(`Login failed: ${error?.message}`);
   return data.session.access_token;
 }

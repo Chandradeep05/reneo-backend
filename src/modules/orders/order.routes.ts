@@ -17,20 +17,10 @@ orderRouter.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
-
-      // Check if this is a cached idempotency response
-      const isIdempotentReturn =
-        idempotencyKey !== undefined &&
-        req.headers['idempotency-key'] !== undefined;
-
       const result = await placeOrder(req.user!.id, req.body, idempotencyKey);
-
-      // Return 200 for idempotent replay, 201 for new order
-      // We detect replay by checking if the order's created_at is > 1s ago
-      const isReplay = isIdempotentReturn &&
-        new Date(result.order.created_at).getTime() < Date.now() - 1000;
-
-      res.status(isReplay ? 200 : 201).json({ data: result });
+      // 200 for idempotent replay (same key seen before), 201 for new order
+      const status = result.fromCache ? 200 : 201;
+      res.status(status).json({ data: result });
     } catch (err) {
       next(err);
     }
