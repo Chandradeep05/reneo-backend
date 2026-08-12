@@ -2,7 +2,6 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { validate } from '../../middleware/validate.middleware';
 import { requireAuth, requireSeller } from '../../middleware/auth.middleware';
 import { z } from 'zod';
-import { supabaseAdmin } from '../../config/supabase';
 import { pool } from '../../db/pool';
 import { ConflictError, NotFoundError } from '../../utils/errors';
 
@@ -32,11 +31,10 @@ storeRouter.post(
       const { name, slug, description } = req.body as z.infer<typeof CreateStoreSchema>;
       const sellerId = req.user!.id;
 
-      const { data: existing } = await supabaseAdmin
-        .from('stores')
-        .select('id')
-        .eq('seller_id', sellerId)
-        .single();
+      const { rows: [existing] } = await pool.query(
+        `SELECT id FROM stores WHERE seller_id = $1 LIMIT 1`,
+        [sellerId]
+      );
 
       if (existing) {
         throw new ConflictError('You already have a store');

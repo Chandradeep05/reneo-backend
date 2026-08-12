@@ -297,10 +297,10 @@ Users → CDN (cached product catalog, static assets)
 
 With 2 more days, I would add:
 1. **Durable notification history**: A `notifications` table so sellers see missed ORDER_CREATED events on next login. The outbox guarantees event persistence; the Realtime broadcast doesn't guarantee delivery.
-2. **Payload hash check for idempotency**: Currently the same key + different payload returns a conflict based on the cached key existing. A proper implementation would hash the payload and return `422 Unprocessable` with a clear message.
-3. **Cursor pagination for price-sorted queries**: The current cursor implementation works cleanly for time-based sorts. Price-sorted cursors need a composite `(price_fcfa, id)` cursor.
-4. **Comprehensive OpenAPI spec**: The Swagger YAML covers the main paths; edge cases and all error response schemas could be more complete.
-5. **Load test for concurrency**: Use `k6` or `autocannon` to verify that `FOR UPDATE` holds at 100+ concurrent order requests.
+2. **Load testing for concurrency**: Use `k6` or `autocannon` to verify that `FOR UPDATE` holds at 100+ concurrent order requests, and measure p99 latency under contention.
+3. **Refresh token rotation**: Sessions expire with Supabase default TTL. Proper token refresh flow would improve UX.
+4. **Stock replenishment API**: Sellers currently cannot add stock after initial creation. A `PATCH /products/:id/inventory` endpoint is needed.
+5. **Rate limiting**: Per-IP and per-user rate limits on auth endpoints to prevent brute-force attacks.
 
 ### D3: AI & Library Usage
 
