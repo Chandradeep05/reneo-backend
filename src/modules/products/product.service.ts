@@ -170,9 +170,11 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
 
   let orderClause: string;
   if (sort === 'relevance' && q) {
-    orderClause = `ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('simple', $${
-      `$${params.indexOf(q) + 1}`
-    })) DESC, p.created_at DESC, p.id DESC`;
+    // Fix: params.indexOf(q) + 1 gives the correct $N index for the search term.
+    // Single interpolation — NOT nested template literals (which produce $$N, a
+    // Postgres dollar-quoted string delimiter, not a parameter placeholder).
+    const qIdx = params.indexOf(q) + 1;
+    orderClause = `ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('simple', $${qIdx})) DESC, p.created_at DESC, p.id DESC`;
   } else if (sort === 'price_asc') {
     orderClause = 'ORDER BY p.price_fcfa ASC, p.created_at DESC, p.id ASC';
   } else if (sort === 'price_desc') {
@@ -183,6 +185,12 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
     orderClause = 'ORDER BY p.created_at DESC, p.id DESC';
   }
 
+  // For relevance sort, also SELECT the rank so we can encode it into the cursor.
+  // This lets page 2 use (rank, created_at, id) for correct keyset pagination.
+  const rankSelect = (sort === 'relevance' && q)
+    ? `, ts_rank_cd(p.search_vector, websearch_to_tsquery('simple', $${params.indexOf(q) + 1})) AS rank`
+    : '';
+
   params.push(limit + 1);
   const limitClause = `LIMIT $${params.length}`;
 
@@ -192,6 +200,7 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
       p.price_fcfa::bigint AS price_fcfa,
       p.category, p.is_archived, p.created_at, p.updated_at,
       COALESCE(i.quantity, 0)::int AS stock
+      ${rankSelect}
     FROM products p
     LEFT JOIN inventory i ON i.product_id = p.id
     ${whereClause}
@@ -199,7 +208,7 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
     ${limitClause}
   `;
 
-  const { rows } = await pool.query<Product & { stock: number }>(sql, params);
+  const { rows } = await pool.query<Product & { stock: number; rank?: number }>(sql, params);
 
   const hasMore = rows.length > limit;
   const data = (hasMore ? rows.slice(0, limit) : rows).map(coerceProduct);
@@ -207,10 +216,17 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
 
   let nextCursor: string | null = null;
   if (hasMore && lastItem) {
-    const sortValue =
-      sort === 'price_asc' || sort === 'price_desc'
-        ? String(lastItem.price_fcfa)
-        : lastItem.created_at;
+    let sortValue: string;
+    if (sort === 'price_asc' || sort === 'price_desc') {
+      sortValue = String(lastItem.price_fcfa);
+    } else if (sort === 'relevance' && q) {
+      // For relevance pagination, encode the actual ts_rank_cd value so that
+      // page 2 correctly continues from the same ranking position.
+      const rankRow = rows[data.length - 1];
+      sortValue = String(rankRow?.rank ?? 0);
+    } else {
+      sortValue = lastItem.created_at;
+    }
     nextCursor = encodeCursor({ sort_value: sortValue, created_at: lastItem.created_at, id: lastItem.id });
   }
 

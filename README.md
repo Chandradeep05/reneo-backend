@@ -185,20 +185,23 @@ Outbox poller (every 2s):
 
 The order placement service uses a raw `pg.Pool` connection (via `DATABASE_URL`) for explicit transaction control (`BEGIN` / `SELECT FOR UPDATE` / `COMMIT`). This connection does not carry `auth.uid()` context — Supabase RLS policies do not apply to queries run through this pool.
 
-**This is an intentional, documented limitation — not a security hole.** The `placeOrder()` function enforces authorization at the service layer:
+**This is a deliberate privileged-transaction architecture with application-layer authorization for order placement — not a security hole, but not the same as database-enforced RLS.** The two are different guarantees:
+
+- **RLS** (Row Level Security): The *database engine itself* denies unauthorized operations based on `auth.uid()` context, regardless of which application code path issued the query.
+- **Service-layer authorization** (what `placeOrder()` uses): The *application* extracts the verified user identity from the JWT, then passes it as a SQL parameter. The database trusts the application.
+
+What `placeOrder()` enforces at the service layer:
 - `customerId` is always extracted from the **verified JWT** (via `auth.middleware.ts`) and passed explicitly as a SQL parameter — it never comes from `req.body`
 - Cross-seller product access is prevented via a JOIN: `stores.seller_id = $sellerId`
 - The idempotency key is scoped to `orders.customer_id` — a different customer cannot retrieve another customer's order via their key
 
-**What the database does enforce** (independently of this pool):
+**What the database still enforces independently:**
 - RLS on `products` — Supabase-js reads respect seller ownership
 - `CHECK (quantity >= 0)` on inventory — negative stock is impossible at the DB level
 - `UNIQUE` on `orders.idempotency_key` — duplicate orders are structurally impossible
 - `FK` constraints — orphaned order_items are impossible
 
-This tradeoff is made explicitly to unlock `SELECT FOR UPDATE` — which `supabase-js` does not expose. The database-level constraints above provide structural integrity; the service layer provides authorization.
-
-For supabase-js operations (product reads, profile lookups), RLS applies normally. The `products_seller_update` and `products_seller_delete` policies catch cross-seller attempts made via any direct Supabase client path.
+This tradeoff is made explicitly to unlock `SELECT FOR UPDATE` — which `supabase-js` does not expose. For all non-transactional operations (product reads, profile lookups), RLS applies normally via the authenticated Supabase client.
 
 ### Soft Delete
 
@@ -206,13 +209,17 @@ Products are never hard-deleted — `is_archived = true` is set instead. Hard de
 
 ### Cursor Pagination
 
-`GET /products` uses cursor-based pagination. `OFFSET` pagination is O(N) — scanning 1M rows for page 50,000 is unacceptable. Cursor pagination is O(log N) via the GIN/composite indexes.
+`GET /products` uses cursor-based pagination instead of `OFFSET`. `OFFSET` is O(N) — the database must scan and discard all preceding rows on every subsequent page. Cursor pagination skips directly to the correct position via indexed range queries.
+
+- **Full-text search predicate**: accelerated by the GIN index on `search_vector` — O(log N) for the FTS lookup.
+- **Cursor position**: resolved via appropriate B-tree indexes on `(created_at, id)` or `(price_fcfa, created_at, id)` depending on the sort — these avoid full table scans for "next page" queries.
 
 The cursor encodes `(sort_value, created_at, id)` where `sort_value` is the **primary sort dimension**:
-- `newest` / `oldest` / `relevance`: `sort_value = created_at`
+- `newest` / `oldest`: `sort_value = created_at`
 - `price_asc` / `price_desc`: `sort_value = price_fcfa`
+- `relevance`: `sort_value = ts_rank_cd(...)` — the actual rank score, so page 2 continues from the same ranking position
 
-The `WHERE` clause in each query always matches its `ORDER BY` — ensuring page 2+ never returns duplicate or skipped rows, even when prices collide.
+The `WHERE` clause in each query always matches its `ORDER BY` — ensuring page 2+ never returns duplicate or skipped rows, even when sort values collide.
 
 ---
 

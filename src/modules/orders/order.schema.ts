@@ -25,7 +25,14 @@ export const CreateOrderSchema = z
     items: z
       .array(OrderItemSchema)
       .min(1, 'Order must contain at least one item')
-      .max(50, 'Order cannot contain more than 50 items'),
+      .max(50, 'Order cannot contain more than 50 items')
+      .refine(
+        (items) => new Set(items.map((i) => i.product_id)).size === items.length,
+        {
+          message:
+            'Duplicate product_id detected. Combine quantities into a single item per product.',
+        }
+      ),
   })
   .strict(); // Reject unknown top-level fields too
 

@@ -145,4 +145,50 @@ describe('Products API — Tests 1 & 2 + extra', () => {
       .set('Authorization', `Bearer ${customer.token}`);
     expect(getRes.status).toBe(404);
   });
+
+  // ── A4: Full-text search with sort=relevance ─────────────────────────
+  it('FTS search with sort=relevance returns 200 and matched products', async () => {
+    // Seed a product with distinctive searchable text
+    await seedProduct(storeA.id, { name: 'Authentic Ankara Print Fabric', category: 'Textiles', price_fcfa: 3000 });
+    await seedProduct(storeA.id, { name: 'Leather Wallet', category: 'Accessories', price_fcfa: 8000 });
+
+    const res = await request(app)
+      .get('/products?q=ankara&sort=relevance')
+      .set('Authorization', `Bearer ${customer.token}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.data)).toBe(true);
+    expect(res.body).toHaveProperty('hasMore');
+    expect(res.body).toHaveProperty('nextCursor');
+    // The ankara product should appear in results (may not be only result due to shared DB)
+    const names = res.body.data.map((p: { name: string }) => p.name);
+    expect(names.some((n: string) => n.toLowerCase().includes('ankara'))).toBe(true);
+  });
+
+  // ── A4: Cursor follow-through (page 1 → page 2, no overlap) ─────────
+  it('Cursor pagination: page 2 returns no overlap with page 1', async () => {
+    // Seed enough products for 2 pages
+    for (let i = 0; i < 5; i++) {
+      await seedProduct(storeA.id, { name: `Cursor Test Product ${i}`, price_fcfa: 1000 + i });
+    }
+
+    const page1 = await request(app)
+      .get('/products?limit=3&sort=newest')
+      .set('Authorization', `Bearer ${customer.token}`);
+
+    expect(page1.status).toBe(200);
+
+    if (!page1.body.nextCursor) return; // fewer than 4 products in DB — skip
+
+    const page2 = await request(app)
+      .get(`/products?limit=3&sort=newest&cursor=${page1.body.nextCursor}`)
+      .set('Authorization', `Bearer ${customer.token}`);
+
+    expect(page2.status).toBe(200);
+
+    const page1Ids = new Set(page1.body.data.map((p: { id: string }) => p.id));
+    const page2Ids = page2.body.data.map((p: { id: string }) => p.id);
+    // No ID should appear on both pages
+    expect(page2Ids.every((id: string) => !page1Ids.has(id))).toBe(true);
+  });
 });

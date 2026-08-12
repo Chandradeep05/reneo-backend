@@ -155,4 +155,23 @@ describe('Orders API — Tests 3, 4 + extras', () => {
     expect(res.body.data.order.total_fcfa).toBe(5000);
     expect(res.body.data.items[0].unit_price_fcfa).toBe(5000);
   });
+
+  it('Duplicate product_id in order → 400 (prevents double stock deduction)', async () => {
+    const product = await seedProduct(storeId, { price_fcfa: 1000, initial_stock: 10 });
+
+    const res = await request(app)
+      .post('/orders')
+      .set('Authorization', `Bearer ${customer.token}`)
+      .send({
+        items: [
+          { product_id: product.id, quantity: 2 },
+          { product_id: product.id, quantity: 3 }, // duplicate!
+        ],
+      });
+
+    expect(res.status).toBe(400);
+    // ZodError fields contain the duplicate message
+    const allMessages = JSON.stringify(res.body.fields ?? res.body);
+    expect(allMessages).toMatch(/[Dd]uplicate/);
+  });
 });
