@@ -118,7 +118,10 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   order_id   UUID REFERENCES orders(id),
   response   JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at TIMESTAMPTZ NOT NULL GENERATED ALWAYS AS (created_at + INTERVAL '24 hours') STORED
+  -- expires_at uses DEFAULT, not GENERATED ALWAYS AS, because
+  -- timestamptz + interval is STABLE (not IMMUTABLE) â€” PostgreSQL
+  -- rejects it in generated columns (42P17). DEFAULT is fine.
+  expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + INTERVAL '24 hours')
 );
 
 -- â”€â”€ event_outbox â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
