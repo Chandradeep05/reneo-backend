@@ -150,6 +150,20 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
           `(p.price_fcfa = $${pIdx} AND (p.created_at < $${dIdx}::timestamptz OR ` +
           `(p.created_at = $${dIdx}::timestamptz AND p.id > $${iIdx}))))`
         );
+      } else if (sort === 'relevance' && q) {
+        // Relevance cursor: sort_value is a ts_rank_cd float, NOT a timestamp.
+        // The WHERE must use the same ts_rank_cd() expression as the ORDER BY.
+        // q is already in params (pushed at line 114); reuse its index.
+        const qIdx = params.indexOf(q) + 1;
+        const rankExpr = `ts_rank_cd(p.search_vector, websearch_to_tsquery('simple', $${qIdx}))`;
+        const rIdx = params.push(Number(decoded.sort_value));
+        const dIdx = params.push(decoded.created_at);
+        const iIdx = params.push(decoded.id);
+        conditions.push(
+          `(${rankExpr} < $${rIdx} OR ` +
+          `(${rankExpr} = $${rIdx} AND (p.created_at < $${dIdx}::timestamptz OR ` +
+          `(p.created_at = $${dIdx}::timestamptz AND p.id < $${iIdx}))))`
+        );
       } else if (sort === 'oldest') {
         params.push(decoded.sort_value, decoded.id);
         conditions.push(
@@ -157,6 +171,7 @@ export async function listProducts(query: ProductQuery): Promise<PaginatedProduc
           `(p.created_at = $${params.length - 1}::timestamptz AND p.id > $${params.length}))`
         );
       } else {
+        // Default: newest (created_at DESC, id DESC)
         params.push(decoded.sort_value, decoded.id);
         conditions.push(
           `(p.created_at < $${params.length - 1}::timestamptz OR ` +

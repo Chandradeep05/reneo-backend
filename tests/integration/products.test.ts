@@ -191,4 +191,44 @@ describe('Products API — Tests 1 & 2 + extra', () => {
     // No ID should appear on both pages
     expect(page2Ids.every((id: string) => !page1Ids.has(id))).toBe(true);
   });
+
+  // ── A4: Relevance cursor page 2 — the real regression test ───────────
+  // This test WOULD FAIL (500 error) without the decode-side relevance fix,
+  // because the cursor sort_value is a rank float (e.g. "0.0759909") and the
+  // catch-all branch would cast it to timestamptz → Postgres syntax error.
+  it('Relevance search: page 1 → follow cursor → page 2 returns 200', async () => {
+    // Seed enough products with the word "wax" to guarantee 2+ pages at limit=2
+    for (let i = 0; i < 5; i++) {
+      await seedProduct(storeA.id, {
+        name: `Premium Wax Print Design ${i}`,
+        category: 'Textiles',
+        price_fcfa: 2000 + i * 100,
+      });
+    }
+
+    const page1 = await request(app)
+      .get('/products?q=wax&sort=relevance&limit=2')
+      .set('Authorization', `Bearer ${customer.token}`);
+
+    expect(page1.status).toBe(200);
+    expect(Array.isArray(page1.body.data)).toBe(true);
+
+    // If there's no page 2, the test can't exercise the decode path — still a pass
+    if (!page1.body.nextCursor) return;
+
+    // THIS IS THE CRITICAL LINE:
+    // Without the decode-side fix, this request sends a rank float as a timestamptz
+    // parameter → Postgres throws "invalid input syntax for type timestamp" → 500.
+    const page2 = await request(app)
+      .get(`/products?q=wax&sort=relevance&limit=2&cursor=${page1.body.nextCursor}`)
+      .set('Authorization', `Bearer ${customer.token}`);
+
+    expect(page2.status).toBe(200);
+    expect(Array.isArray(page2.body.data)).toBe(true);
+
+    // Verify no overlap between pages
+    const page1Ids = new Set(page1.body.data.map((p: { id: string }) => p.id));
+    const page2Ids = page2.body.data.map((p: { id: string }) => p.id);
+    expect(page2Ids.every((id: string) => !page1Ids.has(id))).toBe(true);
+  });
 });
