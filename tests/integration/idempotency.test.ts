@@ -65,7 +65,7 @@ describe('Idempotency — B2', () => {
     expect(countRow?.count).toBe(1);
   });
 
-  it('Same key + different payload → 409', async () => {
+  it('Same key + different payload → 409 (hash mismatch)', async () => {
     const product1 = await seedProduct(storeId, { price_fcfa: 1000, initial_stock: 5 });
     const product2 = await seedProduct(storeId, { price_fcfa: 2000, initial_stock: 5 });
     const idempotencyKey = uuidv4();
@@ -78,20 +78,20 @@ describe('Idempotency — B2', () => {
       .send({ items: [{ product_id: product1.id, quantity: 1 }] });
 
     expect(res1.status).toBe(201);
+    await new Promise((r) => setTimeout(r, 150));
 
-    await new Promise((r) => setTimeout(r, 100));
-
-    // Second request with same key but DIFFERENT payload (product2)
-    // The idempotency key is already used — should detect mismatch
+    // Second request — same key but DIFFERENT payload (product2 instead of product1)
+    // SHA-256 of canonical input will differ → 409
     const res2 = await request(app)
       .post('/orders')
       .set('Authorization', `Bearer ${customer.token}`)
       .set('Idempotency-Key', idempotencyKey)
       .send({ items: [{ product_id: product2.id, quantity: 1 }] });
 
-    // The key is already claimed — conflict
     expect(res2.status).toBe(409);
+    expect(res2.body.detail).toContain('different request payload');
   });
+
 
   it('Double-click simulation: two concurrent requests with same key', async () => {
     const product = await seedProduct(storeId, { price_fcfa: 5000, initial_stock: 10 });
