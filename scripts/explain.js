@@ -1,11 +1,24 @@
+/**
+ * Run EXPLAIN ANALYZE on the core queries against the live Supabase instance.
+ * Requires DATABASE_URL to be set in .env.
+ *
+ * Usage: node scripts/explain.js
+ */
+require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
+
 const { Pool } = require('pg');
 
 const pool = new Pool({
-  connectionString: 'postgresql://postgres:YOUR_PASSWORD@db.nghvaqzoteyslnwbuodc.supabase.co:6543/postgres',
+  connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
 async function run() {
+  if (!process.env.DATABASE_URL) {
+    console.error('ERROR: DATABASE_URL not set. Copy .env.example to .env and fill in your credentials.');
+    process.exit(1);
+  }
+
   try {
     // Run EXPLAIN ANALYZE on the core FTS + pagination query (A4)
     const ftsResult = await pool.query(`
