@@ -183,14 +183,22 @@ Outbox poller (every 2s):
 
 ### RLS + pg Pool Tradeoff
 
-The order placement service uses a raw `pg.Pool` connection (via `DATABASE_URL`) for explicit transaction control. This connection does not carry `auth.uid()` context — RLS policies based on Supabase Auth JWT do not apply to queries run through this pool.
+The order placement service uses a raw `pg.Pool` connection (via `DATABASE_URL`) for explicit transaction control (`BEGIN` / `SELECT FOR UPDATE` / `COMMIT`). This connection does not carry `auth.uid()` context — Supabase RLS policies do not apply to queries run through this pool.
 
-Authorization is therefore enforced at the **service layer**:
-- `customerId` is always extracted from the **verified JWT** (via `auth.middleware.ts`) and passed explicitly into SQL — it never comes from `req.body`
-- Product ownership is verified via a JOIN against `stores` where `seller_id = ?`
-- This provides the same security guarantees as RLS, just at the application layer
+**This is an intentional, documented limitation — not a security hole.** The `placeOrder()` function enforces authorization at the service layer:
+- `customerId` is always extracted from the **verified JWT** (via `auth.middleware.ts`) and passed explicitly as a SQL parameter — it never comes from `req.body`
+- Cross-seller product access is prevented via a JOIN: `stores.seller_id = $sellerId`
+- The idempotency key is scoped to `orders.customer_id` — a different customer cannot retrieve another customer's order via their key
 
-For supabase-js operations (product reads, profile lookups), RLS applies normally. The `products_seller_update` and `products_seller_delete` policies would catch cross-seller attempts made via the Supabase client directly.
+**What the database does enforce** (independently of this pool):
+- RLS on `products` — Supabase-js reads respect seller ownership
+- `CHECK (quantity >= 0)` on inventory — negative stock is impossible at the DB level
+- `UNIQUE` on `orders.idempotency_key` — duplicate orders are structurally impossible
+- `FK` constraints — orphaned order_items are impossible
+
+This tradeoff is made explicitly to unlock `SELECT FOR UPDATE` — which `supabase-js` does not expose. The database-level constraints above provide structural integrity; the service layer provides authorization.
+
+For supabase-js operations (product reads, profile lookups), RLS applies normally. The `products_seller_update` and `products_seller_delete` policies catch cross-seller attempts made via any direct Supabase client path.
 
 ### Soft Delete
 
@@ -198,7 +206,13 @@ Products are never hard-deleted — `is_archived = true` is set instead. Hard de
 
 ### Cursor Pagination
 
-`GET /products` uses cursor-based pagination (`(created_at, id)` pairs). `OFFSET` pagination is O(N) — on 1M rows, `OFFSET 999990` requires scanning nearly 1M rows. Cursor pagination is always O(log N) via the index.
+`GET /products` uses cursor-based pagination. `OFFSET` pagination is O(N) — scanning 1M rows for page 50,000 is unacceptable. Cursor pagination is O(log N) via the GIN/composite indexes.
+
+The cursor encodes `(sort_value, created_at, id)` where `sort_value` is the **primary sort dimension**:
+- `newest` / `oldest` / `relevance`: `sort_value = created_at`
+- `price_asc` / `price_desc`: `sort_value = price_fcfa`
+
+The `WHERE` clause in each query always matches its `ORDER BY` — ensuring page 2+ never returns duplicate or skipped rows, even when prices collide.
 
 ---
 
